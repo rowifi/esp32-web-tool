@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ESP32 Advanced Web Tool - 16MB Fixed</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; display: flex; justify-content: center; }
+        .container { background: #161b22; border-radius: 12px; padding: 30px; max-width: 650px; width: 100%; border: 1px solid #30363d; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .section { background: #0d1117; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #30363d; }
+        .section h3 { margin-top: 0; color: #58a6ff; font-size: 16px; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+        button { background: #238636; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin: 5px 0; transition: 0.2s; }
+        button:hover:not(:disabled) { background: #2ea043; }
+        button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; border: 1px solid #30363d; }
+        #disconnectBtn { background: #da3633; }
+        .log { background: #000; color: #39ff14; padding: 15px; border-radius: 6px; font-family: 'Cascadia Code', monospace; font-size: 11px; height: 280px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; border: 1px solid #30363d; }
+        input, select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; padding: 10px; width: 100%; border-radius: 6px; margin: 5px 0; box-sizing: border-box; }
+        .status { padding: 12px; border-radius: 6px; margin-top: 10px; font-weight: bold; text-align: center; font-size: 14px; border: 1px solid transparent; }
+        .info { background: #111b27; color: #58a6ff; border-color: #388bfd66; }
+        .success { background: #13231b; color: #3fb950; border-color: #2ea04366; }
+        .error { background: #231111; color: #f85149; border-color: #da363366; }
+        .hidden { display: none; }
+        .badge { background: #30363d; color: #58a6ff; padding: 2px 8px; border-radius: 10px; font-size: 11px; float: right; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 style="margin:0 0 20px 0; color: #fff;">ESP32 Advanced Web Tool</h2>
+
+        <div class="section">
+            <h3>1. Connection Settings</h3>
+            <select id="baudrate">
+                <option value="115200">115200 (Stable)</option>
+                <option value="460800" selected>460800 (Fast)</option>
+                <option value="921600">921600 (Extreme)</option>
+            </select>
+            <button id="connectBtn">CONNECT DEVICE</button>
+            <button id="disconnectBtn" class="hidden">DISCONNECT</button>
+            <div id="connStatus" class="status info">Ready</div>
+        </div>
+
+        <div id="toolset" class="hidden">
+            <div class="section">
+                <h3>2. Firmware Flash</h3>
+                <input type="file" id="firmwareFile" accept=".bin">
+                <input type="text" id="flashAddr" value="0x1000" placeholder="Flash Address (bootloader: 0x1000, full backup: 0x0)">
+                <button id="flashBtn">START WRITE</button>
+            </div>
+
+            <div class="section">
+                <h3>3. Flash Backup <span class="badge" id="chipSizeDisplay">16MB</span></h3>
+                <button id="readAllBtn" style="background: #1f6feb;">BACKUP ENTIRE FLASH (16MB)</button>
+            </div>
+        </div>
+
+        <div id="log" class="log">Console ready.</div>
+    </div>
+
+   <script type="module">
+       import { ESPLoader, Transport } from 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
+
+       let esploader, transport;
+       let detectedSize = 16 * 1024 * 1024;
+
+       const logEl = document.getElementById('log');
+       const connStatus = document.getElementById('connStatus');
+       const toolset = document.getElementById('toolset');
+       const connectBtn = document.getElementById('connectBtn');
+       const disconnectBtn = document.getElementById('disconnectBtn');
+       const chipSizeDisplay = document.getElementById('chipSizeDisplay');
+
+       function addLog(msg) {
+           logEl.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+           logEl.scrollTop = logEl.scrollHeight;
+       }
+
+       async function hardReset() {
+           if (transport) {
+               addLog("Resetting chip...");
+               await transport.setRTS(true);
+               await new Promise(r => setTimeout(r, 200));
+               await transport.setRTS(false);
+           }
+       }
+
+       connectBtn.onclick = async () => {
+           try {
+               const port = await navigator.serial.requestPort();
+               transport = new Transport(port);
+               esploader = new ESPLoader({
+                   transport: transport,
+                   baudrate: parseInt(document.getElementById('baudrate').value),
+                   terminal: {
+                       clean: () => {},
+                       writeLine: (data) => {
+                           addLog(data);
+                           if (data.includes("Detected flash size:")) {
+                               const sizeStr = data.split(":")[1].trim();
+                               chipSizeDisplay.textContent = sizeStr;
+                               detectedSize = parseInt(sizeStr) * 1024 * 1024;
+                           }
+                       },
+                       write: (data) => {}
+                   }
+               });
+               await esploader.main();
+               addLog(`Ready. Capacity: ${chipSizeDisplay.textContent}`);
+               connStatus.className = "status success";
+               connStatus.textContent = "ONLINE";
+               toolset.classList.remove('hidden');
+               disconnectBtn.classList.remove('hidden');
+               connectBtn.classList.add('hidden');
+           } catch (err) {
+               addLog(`Error: ${err.message}`);
+               if (transport) await transport.disconnect();
+           }
+       };
+
+       document.getElementById('flashBtn').onclick = async () => {
+           const file = document.getElementById('firmwareFile').files[0];
+           if (!file) return alert("Select a .bin file");
+
+           try {
+               document.getElementById('flashBtn').disabled = true;
+               addLog(`Preparing ${file.name} (${file.size} bytes)...`);
+
+               // Read file as ArrayBuffer for proper binary handling
+               const arrayBuffer = await file.arrayBuffer();
+               const uint8Array = new Uint8Array(arrayBuffer);
+               
+               // CRITICAL: Convert to Latin-1 string (each char = one byte)
+               // This is what esptool-js expects internally
+               let binaryString = '';
+               for (let i = 0; i < uint8Array.length; i++) {
+                   binaryString += String.fromCharCode(uint8Array[i]);
+               }
+
+               addLog("Data converted. Starting flash...");
+
+               await esploader.writeFlash({
+                   fileArray: [{
+                       data: binaryString,
+                       address: parseInt(document.getElementById('flashAddr').value, 16)
+                   }],
+                   flashSize: "keep",
+                   flashMode: "keep",
+                   flashFreq: "keep",
+                   compress: true,
+                   reportProgress: (idx, written, total) => {
+                       const pct = Math.floor((written / total) * 100);
+                       connStatus.textContent = `Writing: ${pct}%`;
+                   }
+               });
+
+               addLog("Flash Success!");
+               connStatus.className = "status success";
+               connStatus.textContent = "Flash Complete!";
+               await hardReset();
+           } catch (err) {
+               addLog("Flash Error: " + err.message);
+               connStatus.className = "status error";
+               connStatus.textContent = "Flash Failed!";
+               console.error(err);
+           } finally {
+               document.getElementById('flashBtn').disabled = false;
+           }
+       };
+
+       document.getElementById('readAllBtn').onclick = async () => {
+           try {
+               document.getElementById('readAllBtn').disabled = true;
+               addLog(`Reading ${detectedSize} bytes...`);
+               connStatus.className = "status info";
+               
+               const data = await esploader.readFlash(0, detectedSize, (written, total) => {
+                   const pct = Math.floor((written / total) * 100);
+                   if (pct % 2 === 0) connStatus.textContent = `Reading: ${pct}%`;
+               });
+               
+               // data is already a Uint8Array, use it directly
+               const blob = new Blob([data], { type: 'application/octet-stream' });
+               const url = URL.createObjectURL(blob);
+               const a = document.createElement('a');
+               a.href = url;
+               a.download = `backup_${chipSizeDisplay.textContent}_${new Date().toISOString().slice(0,10)}.bin`;
+               a.click();
+               URL.revokeObjectURL(url);
+               
+               addLog("Backup successful.");
+               connStatus.className = "status success";
+               connStatus.textContent = "Backup Complete!";
+           } catch (err) { 
+               addLog("Read Error: " + err.message);
+               connStatus.className = "status error";
+               connStatus.textContent = "Read Failed!";
+           } finally { 
+               document.getElementById('readAllBtn').disabled = false; 
+           }
+       };
+
+       disconnectBtn.onclick = async () => {
+           await hardReset();
+           if (transport) await transport.disconnect();
+           toolset.classList.add('hidden');
+           disconnectBtn.classList.add('hidden');
+           connectBtn.classList.remove('hidden');
+           connStatus.className = "status info";
+           connStatus.textContent = "Disconnected";
+           addLog("Device disconnected.");
+       };
+   </script>
+</body>
+</html>
